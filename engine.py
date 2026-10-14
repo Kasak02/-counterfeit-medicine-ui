@@ -90,11 +90,14 @@ def generate_screening_decision(distance, threshold, ocr_score, batch, mfg, expi
     return Screening(decision, consistent, warnings, red_flags)
 
 
-def analyze_pack(image_bytes: bytes, threshold: float = DEFAULT_THRESHOLD,
-                 force: str | None = None) -> Result:
-    """STUB. `force` in {"consistent","review","risk"} is used by the demo samples."""
-    n = int(hashlib.sha256(image_bytes).hexdigest(), 16)
+def analyze_pack(front_bytes: bytes, back_bytes: bytes,
+                 threshold: float = DEFAULT_THRESHOLD, force: str | None = None) -> Result:
+    """STUB. Visual check uses the FRONT photo; OCR reads FRONT + BACK (batch/dates are
+    usually on the back). `force` in {"consistent","review","risk"} is for demo samples."""
+    n = int(hashlib.sha256(front_bytes).hexdigest(), 16)
+    m = int(hashlib.sha256(back_bytes).hexdigest(), 16)
     u = lambda k: ((n >> (k * 8)) & 0xFF) / 255.0
+    ub = lambda k: ((m >> (k * 8)) & 0xFF) / 255.0
 
     if force == "consistent":
         dist, score = 0.45 + u(0) * 0.25, 0.60 + 0.20 * (u(1) > 0.5)
@@ -110,8 +113,8 @@ def analyze_pack(image_bytes: bytes, threshold: float = DEFAULT_THRESHOLD,
     products = ["Paracetamol IP 500 mg", "Aceclofenac Tablets", "Azithromycin 500 mg",
                 "Thiocolchicoside Tablets"]
     product = products[(n >> 16) % 4] if readable else None
-    has_fields = score >= 0.60 and u(2) > 0.35
-    batch = f"C{240000 + n % 9999}" if has_fields else None
+    has_fields = score >= 0.60 and ub(2) > 0.25
+    batch = f"C{240000 + m % 9999}" if has_fields else None
     mfg = "JAN 2024" if has_fields else None
     expiry = "DEC 2027" if has_fields else None
     conf = {0.0: 0.0, 0.25: 0.2, 0.40: 0.25, 0.60: 0.55, 0.80: 0.82}[score] + u(3) * 0.1
@@ -123,17 +126,21 @@ def analyze_pack(image_bytes: bytes, threshold: float = DEFAULT_THRESHOLD,
     return Result(round(dist, 6), threshold, ocr, scr, seconds=round(1.2 + u(5), 1))
 
 
-def demo_image(kind: str) -> bytes:
-    """Draws a placeholder pack so the demo works with no uploads."""
+def demo_image(kind: str, side: str = "front") -> bytes:
+    """Draws a placeholder pack (front or back) so the demo works with no uploads."""
     palette = {"consistent": "#0f766e", "review": "#b45309", "risk": "#9f1239"}
     img = Image.new("RGB", (640, 420), "#ffffff")
     d = ImageDraw.Draw(img)
     d.rectangle([20, 20, 620, 400], outline=palette[kind], width=6)
     d.rectangle([20, 20, 620, 110], fill=palette[kind])
-    d.text((40, 55), "DEMO PACK  (placeholder image)", fill="white")
+    d.text((40, 55), f"DEMO PACK - {side.upper()}  (placeholder image)", fill="white")
     d.text((40, 150), f"Sample: {kind}", fill="#12201e")
-    for i in range(4):
-        d.rectangle([40, 200 + i * 40, 400 - i * 30, 215 + i * 40], fill="#d4dcda")
+    if side == "back":
+        for i, t in enumerate(["Batch No.: ------", "Mfg. Date: ------", "Exp. Date: ------"]):
+            d.text((40, 200 + i * 40), t, fill="#12201e")
+    else:
+        for i in range(4):
+            d.rectangle([40, 200 + i * 40, 400 - i * 30, 215 + i * 40], fill="#d4dcda")
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()

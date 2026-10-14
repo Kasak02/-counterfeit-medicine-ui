@@ -1,4 +1,4 @@
-"""MedVerify – Counterfeit Medicine Detector (UI only, models stubbed)."""
+"""PharmaLens – medicine pack screening (UI only, models stubbed)."""
 import io
 import json
 import time
@@ -9,16 +9,20 @@ from PIL import Image
 
 import engine
 
-st.set_page_config(page_title="Pack Screening", page_icon="💊", layout="wide")
+APP_NAME = "PharmaLens"
+
+st.set_page_config(page_title=APP_NAME, page_icon="💊", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
 :root{--teal:#0f766e;--ink:#12201e;--mute:#5b6b68;--line:#dfe6e4;
 --ok:#0f766e;--okbg:#e6f4f1;--warn:#b45309;--warnbg:#fdf2e0;--bad:#9f1239;--badbg:#fde8ee;}
+[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{display:none}
 .block-container{padding-top:2.2rem;max-width:1180px}
 h1,h2,h3{letter-spacing:-.01em}
 .hero{background:linear-gradient(135deg,#0f766e 0%,#115e59 100%);color:#fff;border-radius:18px;
-padding:26px 30px;margin-bottom:22px}
+padding:26px 30px;margin-bottom:18px}
 .hero h1{color:#fff;margin:0 0 4px;font-size:1.9rem}
 .hero p{margin:0;opacity:.88;font-size:1rem}
 .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:14px}
@@ -46,64 +50,55 @@ border:4px solid var(--ink);transform:translateX(-50%)}
 align-items:center;justify-content:center;font-weight:700}
 .step b{display:block}.step span{color:var(--mute);font-size:.92rem}
 .disclaimer{font-size:.8rem;color:var(--mute);margin-top:6px}
-[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--line)}
 .stButton>button[kind="primary"]{border-radius:10px;font-weight:600}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ---------- state ----------
 ss = st.session_state
 ss.setdefault("history", [])
-ss.setdefault("current", None)  # dict(name, bytes, result)
-ss.setdefault("threshold", engine.DEFAULT_THRESHOLD)
-ss.setdefault("force", None)
-
-APP_NAME = "MedVerify"  # <- rename here once you pick a name
+ss.setdefault("current", None)
 
 DECISIONS = {
-    "VISUALLY_CONSISTENT": ("consistent", "🟢 Visually consistent",
+    "VISUALLY_CONSISTENT": ("genuine", "🟢 Visually consistent",
         "The pack looks consistent with genuine reference packaging and the printed text was read with reasonable confidence."),
     "REVIEW_REQUIRED": ("review", "🟡 Review required",
         "The packaging looks consistent, but the printed text was too weak to back that up. Check the pack manually."),
-    "HIGH_SCREENING_RISK": ("risk", "🔴 High screening risk",
+    "HIGH_SCREENING_RISK": ("counterfeit", "🔴 High screening risk",
         "The packaging differs from the genuine reference profile. Do not use it until verified; consider reporting it."),
 }
-CSS_KIND = {"consistent": "genuine", "review": "review", "risk": "counterfeit"}
 
 
 def pill(text, kind):
     return f'<span class="pill p-{kind}">{text}</span>'
 
 
-def run_analysis(name: str, data: bytes, force=None):
-    with st.status("Analysing pack…", expanded=True) as status:
-        for msg in ("Preprocessing image", "Extracting visual embedding",
-                    "Comparing with genuine references", "Reading printed text (OCR)",
-                    "Fusing visual + text evidence"):
-            st.write(msg)
-            time.sleep(0.45)
-        res = engine.analyze_pack(data, ss.threshold, force)
-        status.update(label="Analysis complete", state="complete", expanded=False)
-    ss.current = {"name": name, "bytes": data, "result": res,
-                  "time": datetime.now().strftime("%d %b %H:%M")}
-    ss.history.insert(0, {"Time": ss.current["time"], "File": name,
-                          "Result": DECISIONS[res.screening.decision][1][2:],
-                          "Distance": res.distance, "Batch": res.ocr.batch or "—"})
-
-
-def meter(frac, tick=None, left="Genuine", right="Counterfeit"):
+def meter(frac, tick=None, left="", right=""):
     t = f'<div class="tick" style="left:{tick*100:.1f}%"></div>' if tick is not None else ""
     return (f'<div class="meter">{t}<div class="dot" style="left:{frac*100:.1f}%"></div></div>'
             f'<div class="scale"><span>{left}</span><span>{right}</span></div>')
 
 
+def run_analysis(name, front, back, force=None):
+    with st.status("Analysing pack…", expanded=True) as status:
+        for msg in ("Preprocessing front and back photos", "Extracting visual embedding (front)",
+                    "Comparing with genuine references", "Reading printed text (OCR, both sides)",
+                    "Combining visual + text evidence"):
+            st.write(msg)
+            time.sleep(0.45)
+        res = engine.analyze_pack(front, back, engine.DEFAULT_THRESHOLD, force)
+        status.update(label="Analysis complete", state="complete", expanded=False)
+    ss.current = {"name": name, "result": res, "time": datetime.now().strftime("%d %b %H:%M")}
+    ss.history.insert(0, {"Time": ss.current["time"], "Pack": name,
+                          "Result": DECISIONS[res.screening.decision][1][2:],
+                          "Distance": res.distance, "Batch": res.ocr.batch or "—"})
+
+
 def render_result(cur):
     r = cur["result"]
     kind, title, sub = DECISIONS[r.screening.decision]
-    st.markdown(
-        f'<div class="verdict v-{CSS_KIND[kind]}"><p class="t">{title}</p><p class="s">{sub}</p></div>',
-        unsafe_allow_html=True)
+    st.markdown(f'<div class="verdict v-{kind}"><p class="t">{title}</p><p class="s">{sub}</p></div>',
+                unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Visual distance", f"{r.distance:.3f}", help="Lower = closer to genuine packaging")
@@ -121,98 +116,98 @@ def render_result(cur):
             '<div class="disclaimer">Fields the scan could not read are not signs of a fake pack. '
             "They are simply unverified.</div></div>", unsafe_allow_html=True)
 
-    tab_vis, tab_ocr, tab_raw = st.tabs(["Visual check", "Text on the pack", "Report"])
-
-    with tab_vis:
+    t_vis, t_ocr, t_rep = st.tabs(["Visual check", "Text on the pack", "Report"])
+    with t_vis:
         pos = min(1.0, r.distance / 1.4)
         st.markdown('<div class="card"><h4>Distance from genuine reference profile</h4>' +
                     meter(pos, r.threshold / 1.4, "Close (consistent)", "Far (mismatch)") +
                     f'<div class="disclaimer">Black line = threshold ({r.threshold:.3f}). '
                     "Distance at or below the line is visually consistent.</div></div>",
                     unsafe_allow_html=True)
-
-    with tab_ocr:
+    with t_ocr:
         o = r.ocr
-        lvl = ("ok" if o.evidence_score >= 0.6 else "warn" if o.evidence_score >= 0.25 else "bad")
+        lvl = "ok" if o.evidence_score >= 0.6 else "warn" if o.evidence_score >= 0.25 else "bad"
         nd = "Not detected"
-        rows = [
-            ("Product name", o.product or nd), ("Batch number", o.batch or nd),
-            ("Manufacturing date", o.mfg or nd), ("Expiry date", o.expiry or nd),
-            ("Evidence level", pill(o.evidence_level, lvl)),
-            ("OCR confidence", f"{o.confidence:.2f}"),
-            ("Text regions", str(o.text_regions)), ("OCR method", o.method),
-        ]
+        rows = [("Product name", o.product or nd), ("Batch number", o.batch or nd),
+                ("Manufacturing date", o.mfg or nd), ("Expiry date", o.expiry or nd),
+                ("Evidence level", pill(o.evidence_level, lvl)),
+                ("OCR confidence", f"{o.confidence:.2f}"),
+                ("Text regions", str(o.text_regions)), ("OCR method", o.method)]
         st.markdown('<div class="card"><h4>Extracted fields</h4>' +
                     "".join(f'<div class="kv"><span>{k}</span><b>{v}</b></div>' for k, v in rows) +
                     "</div>", unsafe_allow_html=True)
         with st.expander("Raw OCR text"):
             st.code(o.raw_text or "(nothing read)", language=None)
-
-    with tab_raw:
-        payload = {"file": cur["name"], "time": cur["time"], "decision": r.screening.decision,
+    with t_rep:
+        payload = {"pack": cur["name"], "time": cur["time"], "decision": r.screening.decision,
                    "visual": {"distance": r.distance, "threshold": r.threshold,
                               "consistent": r.screening.visual_consistent},
                    "ocr": {**r.ocr.__dict__, "evidence_level": r.ocr.evidence_level},
                    "warnings": r.screening.warnings, "red_flags": r.screening.red_flags}
         st.json(payload, expanded=False)
         st.download_button("⬇️ Download report (JSON)", json.dumps(payload, indent=2),
-                           file_name="pack_screening_report.json", mime="application/json")
+                           file_name="pharmalens_report.json", mime="application/json")
     st.markdown('<div class="disclaimer">Screening aid only. It cannot confirm a medicine is genuine. '
                 "Verify with the manufacturer or a licensed pharmacist.</div>", unsafe_allow_html=True)
 
 
-# ---------- sidebar ----------
-with st.sidebar:
-    st.markdown(f"### 💊 {APP_NAME}")
-    page = st.radio("Navigate", ["Verify a pack", "Scan history", "How it works"],
-                    label_visibility="collapsed")
-    st.divider()
-    with st.expander("⚙️ Detection settings"):
-        ss.threshold = st.slider("Visual threshold", 0.30, 1.30, ss.threshold, 0.01,
-                                 help="Lower = stricter (more packs flagged as high risk).")
-        st.caption("Default 0.878 from the notebook.")
-    st.caption("UI preview · models not connected")
+def show_photo(col, data, label):
+    with col:
+        try:
+            st.image(Image.open(io.BytesIO(data)), caption=label, use_container_width=True)
+        except Exception:
+            st.error(f"The {label.lower()} photo couldn't be read. Try a JPG or PNG.")
 
-# ---------- pages ----------
-if page == "Verify a pack":
-    st.markdown('<div class="hero"><h1>Check a medicine pack</h1>'
-                "<p>Upload a clear photo of the front of the pack. We check the packaging design "
-                "and the printed text.</p></div>", unsafe_allow_html=True)
 
+# ---------- header ----------
+st.markdown(f'<div class="hero"><h1>💊 {APP_NAME}</h1>'
+            "<p>Check a medicine pack. Add a photo of the front and the back; we compare the "
+            "packaging design and read the printed text.</p></div>", unsafe_allow_html=True)
+
+tab_check, tab_hist, tab_how = st.tabs(["🔍 Check a pack", "🕘 Scan history", "ℹ️ How it works"])
+
+# ---------- check ----------
+with tab_check:
     left, right = st.columns([5, 6], gap="large")
     with left:
-        src = st.radio("Image source", ["Upload", "Use camera", "Try a demo"], horizontal=True,
+        src = st.radio("Image source", ["Upload photos", "Try a demo"], horizontal=True,
                        label_visibility="collapsed")
-        data, name, force = None, None, None
-        if src == "Upload":
-            f = st.file_uploader("Pack photo", type=["jpg", "jpeg", "png", "webp"],
-                                 help="Front of the pack, good light, text readable.")
-            if f:
-                data, name = f.getvalue(), f.name
-        elif src == "Use camera":
-            f = st.camera_input("Take a photo of the pack")
-            if f:
-                data, name = f.getvalue(), "camera.jpg"
+        front = back = force = None
+        name = "pack"
+        if src == "Upload photos":
+            cf, cb = st.columns(2)
+            f = cf.file_uploader("Front of pack", type=["jpg", "jpeg", "png", "webp"],
+                                 key="up_front", help="Brand name and artwork side.")
+            b = cb.file_uploader("Back of pack", type=["jpg", "jpeg", "png", "webp"],
+                                 key="up_back", help="Batch number and dates are usually here.")
+            if f and b:
+                front, back, name = f.getvalue(), b.getvalue(), f.name
+            if f or b:
+                p1, p2 = st.columns(2)
+                if f:
+                    show_photo(p1, f.getvalue(), "Front")
+                if b:
+                    show_photo(p2, b.getvalue(), "Back")
+            if not (f or b):
+                st.markdown('<div class="card"><h4>Tips for good photos</h4>'
+                            "• Flat, front-facing, no glare<br>• Back photo should show batch "
+                            "number and dates<br>• One pack per scan<br>• On a phone, the upload "
+                            "button also opens the camera</div>", unsafe_allow_html=True)
         else:
             kind = st.segmented_control("Demo outcome", ["consistent", "review", "risk"],
-                                        default="consistent", format_func=str.capitalize)
-            kind = kind or "consistent"
-            data, name, force = engine.demo_image(kind), f"demo_{kind}.png", kind
+                                        default="consistent", format_func=str.capitalize) or "consistent"
+            front = engine.demo_image(kind, "front")
+            back = engine.demo_image(kind, "back")
+            force, name = kind, f"demo_{kind}"
+            p1, p2 = st.columns(2)
+            show_photo(p1, front, "Front")
+            show_photo(p2, back, "Back")
 
-        if data:
-            try:
-                st.image(Image.open(io.BytesIO(data)), caption=name, use_container_width=True)
-            except Exception:
-                st.error("That file couldn't be read as an image. Try a JPG or PNG.")
-                data = None
-        else:
-            st.markdown('<div class="card"><h4>Tips for a good photo</h4>'
-                        "• Flat, front-facing, no glare<br>• Batch number and dates visible<br>"
-                        "• One pack per photo</div>", unsafe_allow_html=True)
-
-        if st.button("🔍 Verify pack", type="primary", disabled=data is None,
-                     use_container_width=True):
-            run_analysis(name, data, force)
+        ready = front is not None and back is not None
+        if not ready and src == "Upload photos":
+            st.caption("Add both the front and the back photo to continue.")
+        if st.button("🔍 Check pack", type="primary", disabled=not ready, use_container_width=True):
+            run_analysis(name, front, back, force)
 
     with right:
         if ss.current:
@@ -220,31 +215,30 @@ if page == "Verify a pack":
         else:
             st.markdown('<div class="card" style="text-align:center;padding:60px 20px">'
                         '<div style="font-size:2.6rem">📦</div><b>No result yet</b><br>'
-                        '<span style="color:var(--mute)">Add a photo and press Verify.</span></div>',
+                        '<span style="color:var(--mute)">Add both photos and press Check pack.</span></div>',
                         unsafe_allow_html=True)
 
-elif page == "Scan history":
-    st.markdown("## Scan history")
+# ---------- history ----------
+with tab_hist:
     if not ss.history:
         st.info("Nothing scanned in this session yet.")
     else:
         labels = ["Visually consistent", "Review required", "High screening risk"]
         opts = st.multiselect("Filter by result", labels, default=labels)
-        rows = [h for h in ss.history if h["Result"] in opts]
-        st.dataframe(rows, use_container_width=True, hide_index=True,
+        st.dataframe([h for h in ss.history if h["Result"] in opts], use_container_width=True,
+                     hide_index=True,
                      column_config={"Distance": st.column_config.NumberColumn(format="%.3f")})
         if st.button("Clear history"):
-            ss.history = []
-            ss.current = None
+            ss.history, ss.current = [], None
             st.rerun()
 
-else:
-    st.markdown("## How it works")
+# ---------- how it works ----------
+with tab_how:
     steps = [
-        ("Image check", "A ResNet-18 model turns the pack photo into a fingerprint and measures "
-                        "how far it is from the genuine reference profile."),
-        ("Text check", "OCR reads the product name, batch number and dates, and scores how "
-                       "trustworthy the printed text looks."),
+        ("Front photo: image check", "A ResNet-18 model turns the front of the pack into a fingerprint "
+                                    "and measures how far it is from the genuine reference profile."),
+        ("Both photos: text check", "OCR reads the product name, batch number and dates from both "
+                                   "sides and scores how trustworthy the printed text looks."),
         ("Decision", "Far from genuine means high screening risk. Close to genuine with readable "
                      "text means visually consistent. Close but unreadable means review required."),
         ("Warnings", "Fields the scan could not read are listed as unverified. They are never "
@@ -255,3 +249,4 @@ else:
         for i, (t, d) in enumerate(steps, 1)) + "</div>", unsafe_allow_html=True)
     st.warning("Limits: tested on a small dataset, and OCR often misses batch numbers and dates. "
                "Treat results as a screening aid.", icon="⚠️")
+    st.caption("UI preview · models not connected yet")
