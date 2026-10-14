@@ -1,146 +1,164 @@
 """
-Engine interface for the pack-screening UI.
+Engine interface for PharmaLens.
 
-RIGHT NOW this is a STUB returning deterministic fake results so the UI can be
-designed and tested. When the models are ready, replace `analyze_pack()` only.
-The decision logic below (`generate_screening_decision`) is ported 1:1 from the
-Colab notebook (Step 42), so keep it.
+RIGHT NOW this is a STUB returning deterministic, plausible-looking results so the UI can be
+designed and tested. When the models are ready, replace the body of `analyze_pack()` and keep
+the dataclasses, so app.py does not change. Raw model numbers (distances, scores, confidences)
+are deliberately NOT part of the Report: the UI shows plain-language statuses only.
 
-Real pipeline (from the notebook):
-  image -> ResNet-18 triplet embedding -> visual distance / classifier
-        -> EasyOCR (product, batch, mfg, expiry, confidence, evidence score)
-        -> screening decision (visually consistent / review / high risk)
+Rule carried over from the notebook: a field that could not be READ is "unread" (neutral),
+never a red flag.
 """
 from __future__ import annotations
 
 import hashlib
-import io
 from dataclasses import dataclass, field
+from datetime import date
 
-from PIL import Image, ImageDraw
+# (key, question, roles)  - "No" is treated as a concern
+QUESTIONS = [
+    ("seal", "Is the carton or strip seal intact, with no sign of re-gluing?", ("Consumer", "Pharmacist")),
+    ("print", "Is the printing sharp, with no smudges or spelling mistakes?", ("Consumer", "Pharmacist")),
+    ("holo", "Does the hologram or security mark (if this brand has one) look right and shift as you tilt it?", ("Consumer", "Pharmacist")),
+    ("pills", "Do the tablets or capsules look uniform in colour, size and markings?", ("Consumer", "Pharmacist")),
+    ("source", "Did you buy it from a licensed pharmacy at a normal price?", ("Consumer",)),
+    ("invoice", "Do the batch number and expiry date match the supplier invoice?", ("Pharmacist",)),
+    ("distributor", "Was it supplied by an authorised distributor?", ("Pharmacist",)),
+]
 
-DEFAULT_THRESHOLD = 0.878  # VISUAL_THRESHOLD used in the notebook's final screening logic
-
-# Notebook: calculate_ocr_evidence / interpret_ocr_score
-EVIDENCE_LABELS = {
-    0.0: "No OCR evidence",
-    0.25: "Text detected, weak medicine evidence",
-    0.40: "Low-confidence medicine text",
-    0.60: "Medium-confidence medicine text",
-    0.80: "High-confidence medicine text",
-}
+STATUS_LABEL = {"pass": "Looks consistent", "review": "Worth a closer look",
+                "concern": "Concern", "unread": "Couldn't check"}
 
 
 @dataclass
-class OCR:
-    method: str
-    text_regions: int
-    confidence: float
-    raw_text: str
+class Check:
+    key: str
+    label: str
+    status: str  # pass | review | concern | unread
+    detail: str
+
+
+@dataclass
+class PackInfo:
     product: str | None
+    strength: str | None
+    form: str | None
+    manufacturer: str | None
     batch: str | None
     mfg: str | None
     expiry: str | None
-    evidence_score: float
-
-    @property
-    def evidence_level(self) -> str:
-        return EVIDENCE_LABELS[self.evidence_score]
+    expiry_status: str | None  # in_date | expiring_soon | expired | None
+    months_left: int | None
 
 
 @dataclass
-class Screening:
-    decision: str  # VISUALLY_CONSISTENT | REVIEW_REQUIRED | HIGH_SCREENING_RISK
-    visual_consistent: bool
-    warnings: list[str] = field(default_factory=list)
-    red_flags: list[str] = field(default_factory=list)
+class Report:
+    level: str  # low | moderate | high
+    checks: list[Check]
+    info: PackInfo
+    answers: list[dict] = field(default_factory=list)  # {"q","a","concern"}
+    role: str = "Consumer"
+    closeup_given: bool = False
 
 
-@dataclass
-class Result:
-    distance: float
-    threshold: float
-    ocr: OCR
-    screening: Screening
-    seconds: float = 0.0
+PRODUCTS = [
+    ("Paracetamol", "500 mg", "Tablets", "Cipla Ltd."),
+    ("Azithromycin", "500 mg", "Tablets", "Alkem Laboratories"),
+    ("Amoxicillin", "250 mg", "Capsules", "Sun Pharmaceutical"),
+    ("Cetirizine", "10 mg", "Tablets", "Mankind Pharma"),
+    ("Aceclofenac + Paracetamol", "100 mg + 325 mg", "Tablets", "Micro Labs"),
+]
+MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-def generate_screening_decision(distance, threshold, ocr_score, batch, mfg, expiry) -> Screening:
-    """Ported from the notebook. Unreadable fields are WARNINGS, never red flags."""
-    consistent = distance <= threshold
-    warnings, red_flags = [], []
-    if not consistent:
-        red_flags.append("Visual appearance differs from the genuine reference profile")
-    if ocr_score == 0:
-        warnings.append("No readable text detected by OCR")
-    elif ocr_score < 0.60:
-        warnings.append("OCR text quality is limited")
-    if batch is None:
-        warnings.append("Batch number could not be verified from the image")
-    if mfg is None:
-        warnings.append("Manufacturing date could not be verified from the image")
-    if expiry is None:
-        warnings.append("Expiry date could not be verified from the image")
-    if not consistent:
-        decision = "HIGH_SCREENING_RISK"
-    elif ocr_score >= 0.60:
-        decision = "VISUALLY_CONSISTENT"
-    else:
-        decision = "REVIEW_REQUIRED"
-    return Screening(decision, consistent, warnings, red_flags)
+def _fmt(y, m):
+    return f"{MON[m - 1]} {y}"
 
 
-def analyze_pack(front_bytes: bytes, back_bytes: bytes,
-                 threshold: float = DEFAULT_THRESHOLD, force: str | None = None) -> Result:
-    """STUB. Visual check uses the FRONT photo; OCR reads FRONT + BACK (batch/dates are
-    usually on the back). `force` in {"consistent","review","risk"} is for demo samples."""
-    n = int(hashlib.sha256(front_bytes).hexdigest(), 16)
-    m = int(hashlib.sha256(back_bytes).hexdigest(), 16)
+def analyze_pack(front: bytes, back: bytes, closeup: bytes | None = None,
+                 answers: dict | None = None, role: str = "Consumer") -> Report:
+    """STUB. Replace with: visual check on `front`, OCR on `front`+`back`, security check on
+    `closeup`, then combine. Must return a Report."""
+    answers = answers or {}
+    n = int(hashlib.sha256(front).hexdigest(), 16)
+    m = int(hashlib.sha256(back).hexdigest(), 16)
     u = lambda k: ((n >> (k * 8)) & 0xFF) / 255.0
     ub = lambda k: ((m >> (k * 8)) & 0xFF) / 255.0
 
-    if force == "consistent":
-        dist, score = 0.45 + u(0) * 0.25, 0.60 + 0.20 * (u(1) > 0.5)
-    elif force == "review":
-        dist, score = 0.45 + u(0) * 0.25, [0.0, 0.25, 0.40][int(u(1) * 2.99)]
-    elif force == "risk":
-        dist, score = threshold + 0.08 + u(0) * 0.3, [0.25, 0.40, 0.60][int(u(1) * 2.99)]
+    base = u(0)
+    level = "low" if base < 0.5 else ("moderate" if base < 0.8 else "high")
+
+    # user's quick checks can raise the level, never lower it
+    asked = [(k, q) for k, q, roles in QUESTIONS if role in roles]
+    ans_rows = []
+    concerns = 0
+    for k, q in asked:
+        a = answers.get(k)
+        if a:
+            bad = a == "No"
+            concerns += bad
+            ans_rows.append({"q": q, "a": a, "concern": bad})
+    if concerns >= 3 or (level == "moderate" and concerns >= 2):
+        level = "high"
+    elif level == "low" and concerns >= 2:
+        level = "moderate"
+
+    s = {"low": "pass", "moderate": "review", "high": "concern"}[level]
+    jitter = lambda x: "review" if (x > 0.8 and s == "pass") else s
+
+    prod, strength, form, mfr = PRODUCTS[(n >> 16) % len(PRODUCTS)]
+    text_ok = ub(1) > 0.12
+    batch_ok = text_ok and ub(2) > 0.25
+    dates_ok = text_ok and ub(3) > 0.25
+    today = date.today()
+    mfg_y, mfg_m = today.year - 1 - int(ub(4) * 1.5), 1 + int(ub(5) * 11)
+    exp_months = -3 if ub(6) > 0.92 else int(1 + ub(7) * 34)
+    exp_total = today.year * 12 + today.month - 1 + exp_months
+    exp_y, exp_m = exp_total // 12, exp_total % 12 + 1
+    batch = f"{'ABCDEFGH'[int(ub(8) * 7)]}{240000 + m % 99999}" if batch_ok else None
+    expiry_status = None
+    if dates_ok:
+        expiry_status = "expired" if exp_months < 0 else ("expiring_soon" if exp_months <= 2 else "in_date")
+
+    info = PackInfo(
+        product=prod if text_ok else None, strength=strength if text_ok else None,
+        form=form if text_ok else None, manufacturer=mfr if text_ok else None,
+        batch=batch, mfg=_fmt(mfg_y, mfg_m) if dates_ok else None,
+        expiry=_fmt(exp_y, exp_m) if dates_ok else None,
+        expiry_status=expiry_status, months_left=exp_months if dates_ok else None)
+
+    design = {"pass": "Layout, colours and logo placement match reference packaging.",
+              "review": "Some differences from reference packaging, such as colour tone or logo spacing.",
+              "concern": "Clear differences from reference packaging in layout and colour."}
+    prnt = {"pass": "Text is crisp and evenly printed.",
+            "review": "Print looks slightly uneven in places. A sharper photo may help.",
+            "concern": "Blurred or misaligned text, with possible spelling errors."}
+    sec = {"pass": "Seal and security mark look consistent with reference packs.",
+           "review": "The security mark is hard to judge from this angle. Try a straighter, brighter photo.",
+           "concern": "The seal or security mark looks different from reference packs."}
+
+    checks = [
+        Check("design", "Packaging design", jitter(ub(9)), design[jitter(ub(9))]),
+        Check("print", "Print quality and spelling", s, prnt[s]),
+        Check("text", "Label text",
+              "pass" if text_ok else "unread",
+              "Product name and composition were read clearly." if text_ok
+              else "The text was too faint or blurry to read reliably."),
+        Check("batch", "Batch number", "pass" if batch_ok else "unread",
+              f"Batch {batch} found on the pack." if batch_ok
+              else "No batch number could be read. Retake the back photo in better light."),
+    ]
+    if dates_ok:
+        st_ = "concern" if expiry_status == "expired" else ("review" if expiry_status == "expiring_soon" else "pass")
+        d = (f"Printed expiry date ({info.expiry}) has passed." if expiry_status == "expired"
+             else f"Manufactured {info.mfg}, expires {info.expiry}.")
+        checks.append(Check("dates", "Manufacture and expiry dates", st_, d))
     else:
-        dist = 0.35 + u(0) * 0.9
-        score = [0.0, 0.25, 0.40, 0.60, 0.80][int(u(1) * 4.99)]
-
-    readable = score >= 0.40
-    products = ["Paracetamol IP 500 mg", "Aceclofenac Tablets", "Azithromycin 500 mg",
-                "Thiocolchicoside Tablets"]
-    product = products[(n >> 16) % 4] if readable else None
-    has_fields = score >= 0.60 and ub(2) > 0.25
-    batch = f"C{240000 + m % 9999}" if has_fields else None
-    mfg = "JAN 2024" if has_fields else None
-    expiry = "DEC 2027" if has_fields else None
-    conf = {0.0: 0.0, 0.25: 0.2, 0.40: 0.25, 0.60: 0.55, 0.80: 0.82}[score] + u(3) * 0.1
-    raw = (f"Cipla | 10 x 15 Tablets | {product} | Analgesic | Effective relief" if readable
-           else "Videx 6810 0 EOSFF GCLD 101 Faiaonls QC+O/O" if score else "")
-    ocr = OCR("upscaled_primary" if score >= 0.6 else "upscaled_clahe_fallback",
-              int(6 + u(4) * 30), round(conf, 4), raw, product, batch, mfg, expiry, score)
-    scr = generate_screening_decision(dist, threshold, score, batch, mfg, expiry)
-    return Result(round(dist, 6), threshold, ocr, scr, seconds=round(1.2 + u(5), 1))
-
-
-def demo_image(kind: str, side: str = "front") -> bytes:
-    """Draws a placeholder pack (front or back) so the demo works with no uploads."""
-    palette = {"consistent": "#0f766e", "review": "#b45309", "risk": "#9f1239"}
-    img = Image.new("RGB", (640, 420), "#ffffff")
-    d = ImageDraw.Draw(img)
-    d.rectangle([20, 20, 620, 400], outline=palette[kind], width=6)
-    d.rectangle([20, 20, 620, 110], fill=palette[kind])
-    d.text((40, 55), f"DEMO PACK - {side.upper()}  (placeholder image)", fill="white")
-    d.text((40, 150), f"Sample: {kind}", fill="#12201e")
-    if side == "back":
-        for i, t in enumerate(["Batch No.: ------", "Mfg. Date: ------", "Exp. Date: ------"]):
-            d.text((40, 200 + i * 40), t, fill="#12201e")
+        checks.append(Check("dates", "Manufacture and expiry dates", "unread",
+                            "Dates could not be read from the photos."))
+    if closeup:
+        checks.append(Check("security", "Seal and security features", s, sec[s]))
     else:
-        for i in range(4):
-            d.rectangle([40, 200 + i * 40, 400 - i * 30, 215 + i * 40], fill="#d4dcda")
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return buf.getvalue()
+        checks.append(Check("security", "Seal and security features", "unread",
+                            "Not assessed. Add a close-up of the seal or hologram to check this."))
+    return Report(level, checks, info, ans_rows, role, closeup is not None)
